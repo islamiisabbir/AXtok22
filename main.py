@@ -21,9 +21,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ATOK_FILE_NAME = "accounts.txt"
 PROXY_FILE_NAME = "proxies.txt"
 
-CONCURRENT_ACCOUNTS = 5   # একসাথে ৫টি একাউন্ট চলবে
-BOTS_PER_ACCOUNT = 10      # প্রতি একাউন্টে ১০টি বট থ্রেড
-BASE_LIMIT = 400          # প্রতিটি একাউন্টের টার্গেট
+CONCURRENT_ACCOUNTS = 20   # একসাথে ৫টি একাউন্ট চলবে
+BOTS_PER_ACCOUNT = 20      # প্রতি একাউন্টে ১০টি বট থ্রেড
+BASE_LIMIT = 800          # প্রতিটি একাউন্টের টার্গেট
 
 # গিটহাবের জন্য লাইভ লগিং ফাংশন
 def safe_log(message):
