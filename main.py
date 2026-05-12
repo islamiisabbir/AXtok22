@@ -3,14 +3,11 @@ import requests
 import threading
 import time
 import json
-import base64
 import urllib.parse
 import datetime
 import urllib3
 import random
 import os
-import re
-import sys
 
 # SSL Warnings বন্ধ করা
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -21,32 +18,24 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ATOK_FILE_NAME = "accounts.txt"
 PROXY_FILE_NAME = "proxies.txt"
 
-CONCURRENT_ACCOUNTS = 20   # একসাথে ৫টি একাউন্ট চলবে
-BOTS_PER_ACCOUNT = 20      # প্রতি একাউন্টে ১০টি বট থ্রেড
-BASE_LIMIT = 800          # প্রতিটি একাউন্টের টার্গেট
+CONCURRENT_ACCOUNTS = 20   # একসাথে ২০টি একাউন্ট চলবে
+BOTS_PER_ACCOUNT = 20      # প্রতি একাউন্টে ২০টি বট থ্রেড
+BASE_LIMIT = 870          # প্রতিটি একাউন্টের টার্গেট
 
-# গিটহাবের জন্য লাইভ লগিং ফাংশন
+# লাইভ লগিং ফাংশন (গিটহাবের জন্য অপ্টিমাইজড)
 def safe_log(message):
     timestamp = datetime.datetime.now().strftime('%H:%M:%S')
     log_msg = f"[{timestamp}] {message}"
     print(log_msg, flush=True) # flush=True দিলে গিটহাবে সাথে সাথে লেখা আসবে
 
-def get_user_id_from_jwt(token):
-    try:
-        payload = token.split('.')[1]
-        payload += '=' * (-len(payload) % 4)
-        decoded = json.loads(base64.b64decode(payload).decode())
-        return str(decoded['id'])
-    except:
-        return None
 
 class AtokMultiBot:
     def __init__(self):
         self.account_list = []
         self.proxy_list = []
-        self.total_cycle_rewards = 0
 
     def load_files(self):
+        # Accounts.txt থেকে UserID | Email রিড করা
         if not os.path.exists(ATOK_FILE_NAME):
             safe_log("❌ Error: accounts.txt ফাইলটি পাওয়া যায়নি!")
             return False
@@ -54,25 +43,19 @@ class AtokMultiBot:
         with open(ATOK_FILE_NAME, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if not line: continue
-                email, token = "", ""
-                if "Email:" in line and "Token:" in line:
-                    em_match = re.search(r"Email:\s*([^,\s|]+)", line)
-                    tk_match = re.search(r"Token:\s*([^,\s|]+)", line)
-                    if em_match: email = em_match.group(1).strip()
-                    if tk_match: token = tk_match.group(1).strip()
-                elif "|" in line:
-                    parts = line.split("|")
-                    for p in parts:
-                        p = p.strip()
-                        if "@" in p: email = p
-                        if len(p) > 50: token = p
+                # লাইন ফাঁকা হলে বা '|' না থাকলে স্কিপ করবে
+                if not line or "|" not in line: 
+                    continue
                 
-                if email and token:
-                    uid = get_user_id_from_jwt(token)
-                    if uid:
-                        self.account_list.append({"email": email, "token": token, "uid": uid})
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    uid = parts[0].strip()
+                    email = parts[1].strip()
+                    
+                    if uid and email:
+                        self.account_list.append({"email": email, "uid": uid})
         
+        # Proxies.txt রিড করা (যদি থাকে)
         if os.path.exists(PROXY_FILE_NAME):
             with open(PROXY_FILE_NAME, "r") as f:
                 for line in f:
@@ -113,6 +96,7 @@ class AtokMultiBot:
                             if state['count'] % 50 == 0:
                                 safe_log(f"⚡ [অ্যাক্টিভ] {email}: {state['count']}/{state['target']} ক্লেইম সফল।")
             except:
+                # নেটওয়ার্ক এরর হলে ২ সেকেন্ড অপেক্ষা করে আবার চেষ্টা করবে
                 time.sleep(2)
             time.sleep(random.randint(2, 4))
 
@@ -120,41 +104,62 @@ class AtokMultiBot:
         target = BASE_LIMIT + random.randint(-30, 30)
         state = {'count': 0, 'target': target, 'lock': threading.Lock()}
         
-        safe_log(f"▶️ একাউন্ট শুরু: {acc['email']} | টার্গেট: {target}")
+        safe_log(f"▶️ একাউন্ট শুরু: {acc['email']} | UserID: {acc['uid']} | টার্গেট: {target}")
         
         threads = []
         for _ in range(BOTS_PER_ACCOUNT):
             t = threading.Thread(target=self.worker, args=(acc['uid'], acc['email'], state))
-            t.start(); threads.append(t)
+            t.start()
+            threads.append(t)
         
-        for t in threads: t.join()
+        for t in threads: 
+            t.join()
+            
         safe_log(f"✅ একাউন্ট সম্পন্ন: {acc['email']} | মোট ক্লেইম: {state['count']}")
 
     def start_loop(self):
         cycle = 1
         while True:
-            safe_log(f"\n{'#'*40}\n🚀 সাইকেল শুরু: {cycle}\n{'#'*40}")
-            
-            # একাউন্টগুলোকে ছোট ছোট গ্রুপে ভাগ করা (Parallel processing)
-            accounts = self.account_list.copy()
-            random.shuffle(accounts)
-            
-            for i in range(0, len(accounts), CONCURRENT_ACCOUNTS):
-                batch = accounts[i:i + CONCURRENT_ACCOUNTS]
-                batch_threads = []
-                for acc in batch:
-                    t = threading.Thread(target=self.process_account, args=(acc,))
-                    t.start(); batch_threads.append(t)
+            try:
+                safe_log(f"\n{'#'*40}\n🚀 সাইকেল শুরু: {cycle}\n{'#'*40}")
                 
-                for t in batch_threads: t.join()
-            
-            safe_log(f"🏁 সাইকেল {cycle} শেষ। ২ মিনিট বিরতির পর আবার শুরু হবে...")
-            time.sleep(120)
-            cycle += 1
+                # একাউন্টগুলোকে ছোট ছোট গ্রুপে ভাগ করা (Parallel processing)
+                accounts = self.account_list.copy()
+                random.shuffle(accounts)
+                
+                for i in range(0, len(accounts), CONCURRENT_ACCOUNTS):
+                    batch = accounts[i:i + CONCURRENT_ACCOUNTS]
+                    batch_threads = []
+                    for acc in batch:
+                        t = threading.Thread(target=self.process_account, args=(acc,))
+                        t.start()
+                        batch_threads.append(t)
+                    
+                    for t in batch_threads: 
+                        t.join()
+                
+                safe_log(f"🏁 সাইকেল {cycle} শেষ। ২ মিনিট বিরতির পর আবার শুরু হবে...")
+                time.sleep(120)
+                cycle += 1
+            except Exception as e:
+                safe_log(f"⚠️ সাইকেলে সমস্যা হয়েছে: {e}")
+                time.sleep(10) # সমস্যা হলে 10 সেকেন্ড পর আবার ট্রাই করবে
 
+# ==========================================
+# মেইন এক্সিকিউশন (সারাজীবন চলার জন্য Auto-Restart লুপ)
+# ==========================================
 if __name__ == "__main__":
-    bot = AtokMultiBot()
-    if bot.load_files():
-        bot.start_loop()
-    else:
-        safe_log("❌ বট চালু করা সম্ভব হয়নি। accounts.txt চেক করুন।")
+    while True:
+        try:
+            bot = AtokMultiBot()
+            if bot.load_files():
+                bot.start_loop()
+            else:
+                safe_log("❌ বট চালু করা সম্ভব হয়নি। 'accounts.txt' ফাইলে 'UserID | Email' এই ফরম্যাটে ডেটা রাখুন।")
+                time.sleep(60) # ফাইল না পেলে ৬০ সেকেন্ড পর আবার চেক করবে
+        except KeyboardInterrupt:
+            safe_log("🛑 বট ম্যানুয়ালি বন্ধ করা হয়েছে।")
+            break
+        except Exception as e:
+            safe_log(f"🔥 সিস্টেম ক্র্যাশ করেছে: {e}। ১০ সেকেন্ড পর অটোমেটিক রিস্টার্ট হচ্ছে...")
+            time.sleep(10)
