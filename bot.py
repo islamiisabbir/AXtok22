@@ -20,7 +20,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 ACCOUNT_FILE = "accounts.txt"             
 PROXY_FILE = "proxies.txt"                
-MAX_CONCURRENT_ACCOUNTS = 20              # একসাথে ২০টি অ্যাকাউন্ট চলবে
+MAX_CONCURRENT_ACCOUNTS = 1              # একসাথে ২০টি অ্যাকাউন্ট চলবে
 REWARD_LIMIT_PER_ACCOUNT = 1000           # প্রতি অ্যাকাউন্টে ১০০০ রিওয়ার্ড
 MIN_AD_DELAY = 2                          # একটি অ্যাড দেখার পর সর্বনিম্ন অপেক্ষা
 MAX_AD_DELAY = 4                          # সর্বোচ্চ অপেক্ষা
