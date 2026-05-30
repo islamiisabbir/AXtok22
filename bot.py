@@ -14,18 +14,23 @@ import re
 # SSL ওয়ার্নিং বন্ধ করা
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ==========================================
+# =========================================================================
 # ⚙️ কনফিগারেশন প্যানেল ⚙️
-# ==========================================
+# =========================================================================
 
 ACCOUNT_FILE = "accounts.txt"             
 PROXY_FILE = "proxies.txt"                
-MAX_CONCURRENT_ACCOUNTS = 1              # একসাথে ২০টি অ্যাকাউন্ট চলবে
-REWARD_LIMIT_PER_ACCOUNT = 1000           # প্রতি অ্যাকাউন্টে ১০০০ রিওয়ার্ড
-MIN_AD_DELAY = 2                          # একটি অ্যাড দেখার পর সর্বনিম্ন অপেক্ষা
-MAX_AD_DELAY = 4                          # সর্বোচ্চ অপেক্ষা
 
-# ডিফল্ট কুকিজ এবং হেডার ডেটা (আপনার কাজ করা স্ক্রিপ্ট থেকে)
+# মাল্টি-থ্রেডিং কন্ট্রোল (আপনার রিকোয়ারমেন্ট অনুযায়ী)
+MAX_CONCURRENT_ACCOUNTS = 5               # একসাথে কতগুলো 'অ্যাকাউন্ট' চলবে (উদা: ৫টি)
+THREADS_PER_ACCOUNT = 4                   # প্রতিটি অ্যাকাউন্টে একসাথে কতগুলো 'বট/কানেকশন' চলবে (উদা: ৪টি)
+                                          # (উপরের সেটিংসে মোট ৫x৪ = ২০টি বট একসাথে কাজ করবে)
+
+REWARD_LIMIT_PER_ACCOUNT = 1000           # প্রতি অ্যাকাউন্টে রিওয়ার্ড লিমিট
+MIN_AD_DELAY = 1                          # একটি অ্যাড দেখার পর সর্বনিম্ন অপেক্ষা (সেকেন্ড)
+MAX_AD_DELAY = 2                          # সর্বোচ্চ অপেক্ষা (সেকেন্ড)
+
+# ডিফল্ট কুকিজ এবং হেডার ডেটা
 DEFAULT_COOKIE = "IDE=AHWqTUmv5tx0LM4018aYpaP87TuE4_YOMKmgDrU0rj4CuPJY3-vPkfmvJjZIP7j2yWE"
 DEFAULT_DRT = "AICoiYOkO_zvNeR0SAqE9ciDuzu4ROzD5M_h6bWR-jRQqz2ecWVHMuFytCRZ2EMBthrpGxJCHdhSO-gZimPDzWmoKU7V5bcsoXhKRUHHQH8lUGMmGnTp-xCP2Np9W73-LshmiC0y1vN33tqKW9elp9vnqP96g5mK3IcJTE8RVJjhTTaoWxvS_yTsnm9P3fnwLMu3R5FA_ucj0uu2pvQUXJX7y2jEH2h5pwTgUqVn2w7HhwTodRVqboXhL0ZAu85T6Sm6lMg7kVILH2emmPF_V6qiBSSg_92bqA"
 
@@ -41,11 +46,14 @@ GOOGLE_HEADERS = {
     "Connection": "Keep-Alive"
 }
 
-# ================= HELPER FUNCTIONS =================
-def log_msg(email, msg):
+# =========================================================================
+# HELPER FUNCTIONS
+# =========================================================================
+
+def log_msg(email, msg, symbol="ℹ️"):
     """গিটহাবের জন্য flush=True যুক্ত ক্লিন লগিং ফাংশন"""
     current_time = datetime.datetime.now().strftime('%H:%M:%S')
-    print(f"[{current_time}] [{email}] {msg}", flush=True)
+    print(f"[{current_time}] [{email}] {symbol} {msg}", flush=True)
 
 def load_accounts():
     accounts = []
@@ -89,7 +97,6 @@ def get_dynamic_gma_url():
     return GMA_URL_BASE.replace("{REQ_ID}", req_id).replace("{SEQ_NUM}", seq_num).replace("{FBS_AEID}", fbs_aeid)
 
 def get_atok_data(uid):
-    """আপনার দেওয়া কাজ করা CHECKIN_AD লজিক"""
     now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
     data = {"key": f"{uid}{now}", "type": "CHECKIN_AD", "checkInSequence": 1}
     return urllib.parse.quote(json.dumps(data, separators=(',', ':')))
@@ -136,27 +143,39 @@ def send_ad_pings(session, url_list, uid, proxy=None):
         if not url: continue
         clean_url = format_url(url, uid)
         try:
-            # Verify=False ব্যবহার করা হয়েছে আপনার আগের কোডের মত
             res = session.get(clean_url, proxies=proxy, verify=False, timeout=10)
             if res.status_code in [200, 204]:
                 success = True
         except Exception: pass
     return success
 
+
 # =========================================================================
-# 🤖 কোর বট ওয়ার্কার (১০০০ রিওয়ার্ড লুপ)
+# 🤖 সিঙ্গেল বট (একটি কানেকশনের জন্য)
 # =========================================================================
-def run_bot(account, proxy_list):
-    uid = account['uid']
-    email = account['email']
-    success_count = 0
-    
+class AccountState:
+    """একটি অ্যাকাউন্টের সেন্ট্রাল ডেটা স্টোর, যা সব থ্রেড শেয়ার করবে"""
+    def __init__(self, uid, email, limit):
+        self.uid = uid
+        self.email = email
+        self.limit = limit
+        self.success_count = 0
+        self.lock = threading.Lock()
+
+def single_bot_worker(acc_state, proxy_list):
+    """একটি থ্রেড যা একটি অ্যাকাউন্টের জন্য কন্টিনিউয়াসলি অ্যাড দেখবে"""
     session = requests.Session()
     session.headers.update(GOOGLE_HEADERS)
 
-    log_msg(email, "রিওয়ার্ড যুক্ত করার বট চালু হয়েছে")
+    # যাতে সবগুলো থ্রেড একই মিলি-সেকেন্ডে রিকুয়েস্ট না করে
+    time.sleep(random.uniform(0.1, 2.0))
 
-    while success_count < REWARD_LIMIT_PER_ACCOUNT:
+    while True:
+        # লিমিট চেক
+        with acc_state.lock:
+            if acc_state.success_count >= acc_state.limit:
+                break
+
         proxy = random.choice(proxy_list) if proxy_list else None
         dynamic_gma_url = get_dynamic_gma_url()
         
@@ -192,66 +211,78 @@ def run_bot(account, proxy_list):
             ad_duration = get_video_duration(ad_html)
             split_time = ad_duration / 4.0
 
-            # --- অ্যাড ভিউ সাইকেল ---
-            send_ad_pings(session, fill_urls, uid, proxy)
-            send_ad_pings(session, impression_urls, uid, proxy)
-            send_ad_pings(session, impression_xml, uid, proxy)
+            # --- Pings & Watch Time Simulation ---
+            send_ad_pings(session, fill_urls, acc_state.uid, proxy)
+            send_ad_pings(session, impression_urls, acc_state.uid, proxy)
+            send_ad_pings(session, impression_xml, acc_state.uid, proxy)
 
             time.sleep(1)
-            send_ad_pings(session, video_start_urls, uid, proxy)
-            send_ad_pings(session, start_xml, uid, proxy)
-            send_ad_pings(session, active_views, uid, proxy)
+            send_ad_pings(session, video_start_urls, acc_state.uid, proxy)
+            send_ad_pings(session, start_xml, acc_state.uid, proxy)
+            send_ad_pings(session, active_views, acc_state.uid, proxy)
 
             time.sleep(split_time)
-            send_ad_pings(session, q25, uid, proxy)
+            send_ad_pings(session, q25, acc_state.uid, proxy)
             
             time.sleep(split_time)
-            send_ad_pings(session, q50, uid, proxy)
+            send_ad_pings(session, q50, acc_state.uid, proxy)
             
             time.sleep(split_time)
-            send_ad_pings(session, q75, uid, proxy)
+            send_ad_pings(session, q75, acc_state.uid, proxy)
             
             time.sleep(split_time)
-            send_ad_pings(session, complete_xml, uid, proxy)
-            send_ad_pings(session, video_complete_urls, uid, proxy)
+            send_ad_pings(session, complete_xml, acc_state.uid, proxy)
+            send_ad_pings(session, video_complete_urls, acc_state.uid, proxy)
 
             time.sleep(1.5)
             
-            # --- রিওয়ার্ড ক্লেইম ---
-            reward_status = send_ad_pings(session, reward_urls, uid, proxy)
-
-            if reward_status:
-                success_count += 1
-                # শুধুমাত্র ৫০টি পর পর লগ দেখাবে
-                if success_count % 50 == 0:
-                    log_msg(email, f"✅ রিওয়ার্ড যুক্ত হয়েছে! [{success_count}/{REWARD_LIMIT_PER_ACCOUNT}]")
-                    
+            # --- Request Reward ---
+            if send_ad_pings(session, reward_urls, acc_state.uid, proxy):
+                with acc_state.lock:
+                    if acc_state.success_count < acc_state.limit:
+                        acc_state.success_count += 1
+                        if acc_state.success_count % 50 == 0:
+                            log_msg(acc_state.email, f"✅ রিওয়ার্ড যুক্ত হয়েছে! [{acc_state.success_count}/{acc_state.limit}]")
+                            
         except Exception:
             time.sleep(3)
         
-        # পরবর্তী অ্যাডের আগে রেন্ডম বিরতি
         time.sleep(random.randint(MIN_AD_DELAY, MAX_AD_DELAY))
-        
-    log_msg(email, "এই অ্যাকাউন্টের লিমিট শেষ হয়েছে।")
+
 
 # =========================================================================
-# মাল্টি-থ্রেডিং (Queue System)
+# অ্যাকাউন্ট ম্যানেজার (কিউ থেকে অ্যাকাউন্ট নেবে এবং তার জন্য মাল্টিপল বট চালাবে)
 # =========================================================================
-def worker_thread(q, proxy_list):
-    """Queue থেকে একটি একটি করে অ্যাকাউন্ট নিয়ে কাজ করবে"""
+def account_manager(q, proxy_list):
+    """একটি অ্যাকাউন্টের দায়িত্ব নিয়ে তার জন্য THREADS_PER_ACCOUNT সংখ্যক বট চালু করবে"""
     while not q.empty():
         try:
-            account = q.get_nowait()
+            account_dict = q.get_nowait()
         except queue.Empty:
             break
         
-        run_bot(account, proxy_list)
+        acc_state = AccountState(account_dict['uid'], account_dict['email'], REWARD_LIMIT_PER_ACCOUNT)
+        log_msg(acc_state.email, f"রিওয়ার্ড যুক্ত করার বট চালু হয়েছে ({THREADS_PER_ACCOUNT} টি কানেকশন একসাথে চলছে)", "🚀")
+        
+        # এই অ্যাকাউন্টের জন্য নির্দিষ্ট সংখ্যক বট (Thread) তৈরি
+        threads = []
+        for _ in range(THREADS_PER_ACCOUNT):
+            t = threading.Thread(target=single_bot_worker, args=(acc_state, proxy_list))
+            t.start()
+            threads.append(t)
+            
+        # সব বটগুলোর কাজ শেষ হওয়া পর্যন্ত অপেক্ষা
+        for t in threads:
+            t.join()
+            
+        log_msg(acc_state.email, "এই অ্যাকাউন্টের লিমিট শেষ হয়েছে।", "🏁")
         q.task_done()
 
+
 def main():
-    print("="*60, flush=True)
-    print("🚀 ATOK 24/7 GITHUB ACTIONS BOT (FINAL VERSION) 🚀", flush=True)
-    print("="*60, flush=True)
+    print("="*65, flush=True)
+    print("🚀 ATOK 24/7 GITHUB ACTIONS BOT (MULTI-CONNECTION) 🚀", flush=True)
+    print("="*65, flush=True)
     
     accounts = load_accounts()
     proxies = load_proxies()
@@ -263,29 +294,34 @@ def main():
     print(f"✅ মোট {len(accounts)} টি অ্যাকাউন্ট লোড করা হয়েছে।", flush=True)
     if proxies:
         print(f"✅ মোট {len(proxies)} টি প্রক্সি লোড করা হয়েছে।", flush=True)
-    print(f"✅ একসাথে {MAX_CONCURRENT_ACCOUNTS} টি অ্যাকাউন্ট চলবে।", flush=True)
-    print("="*60, flush=True)
+    
+    print(f"✅ সিস্টেম সেটিংস:")
+    print(f"   - একসাথে চলবে: {MAX_CONCURRENT_ACCOUNTS} টি অ্যাকাউন্ট")
+    print(f"   - প্রতি অ্যাকাউন্টে চলবে: {THREADS_PER_ACCOUNT} টি বট")
+    print(f"   - মোট অ্যাক্টিভ থ্রেড: {MAX_CONCURRENT_ACCOUNTS * THREADS_PER_ACCOUNT} টি")
+    print("="*65, flush=True)
 
     # সব অ্যাকাউন্ট কিউ-তে রাখা হচ্ছে
     q = queue.Queue()
     for acc in accounts:
         q.put(acc)
 
-    threads = []
-    num_threads = min(MAX_CONCURRENT_ACCOUNTS, len(accounts))
+    manager_threads = []
+    num_managers = min(MAX_CONCURRENT_ACCOUNTS, len(accounts))
     
-    for i in range(num_threads):
-        t = threading.Thread(target=worker_thread, args=(q, proxies))
+    # অ্যাকাউন্ট ম্যানেজার থ্রেড চালু করা হচ্ছে
+    for i in range(num_managers):
+        t = threading.Thread(target=account_manager, args=(q, proxies))
         t.start()
-        threads.append(t)
-        time.sleep(0.5) # থ্রেডগুলোর শুরুর মধ্যে হালকা গ্যাপ
+        manager_threads.append(t)
+        time.sleep(0.5)
         
-    for t in threads:
+    for t in manager_threads:
         t.join()
         
-    print("="*60, flush=True)
+    print("="*65, flush=True)
     print("🎉 সব অ্যাকাউন্টের কাজ সফলভাবে সম্পন্ন হয়েছে!", flush=True)
-    print("="*60, flush=True)
+    print("="*65, flush=True)
 
 if __name__ == "__main__":
     main()
